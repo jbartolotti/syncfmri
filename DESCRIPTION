@@ -1,0 +1,14 @@
+Package: syncfmri
+Title: Tools for Synchronized fMRI Analysis
+Version: 0.0.0.9000
+Authors@R: 
+    person("John", "Bartolotti", , "jbartolotti@example.com", role = c("aut", "cre"))
+Description: Infrastructure for synchronized fMRI workflows, including data
+    handling and analysis helpers.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends: 
+    R (>= 4.1.0)
+LazyData: true
