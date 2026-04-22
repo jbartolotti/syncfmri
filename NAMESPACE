@@ -1,1 +1,4 @@
 export(syncfmri_hello)
+export(syncfmri_default_config)
+export(compute_sliding_connectivity)
+export(syncfmri_run_pipeline)
