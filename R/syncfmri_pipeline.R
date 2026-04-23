@@ -34,6 +34,7 @@ syncfmri_default_config <- function() {
 #' @param step_size_tp Integer step size in timepoints.
 #' @param min_points_per_window Minimum non-missing paired timepoints required.
 #' @param regress_pair_mean_signal Logical; if TRUE, regress each ROI on pair mean.
+#' @param diagnostic_context Optional label included in boundary validation errors.
 #'
 #' @return A data frame of sliding-window connectivity values.
 #' @export
@@ -44,11 +45,16 @@ compute_sliding_connectivity <- function(
     window_size_tp,
     step_size_tp = 1L,
     min_points_per_window = 8L,
-    regress_pair_mean_signal = FALSE) {
+    regress_pair_mean_signal = FALSE,
+    diagnostic_context = NULL) {
   if (length(x) != length(y)) {
     stop("x and y must have the same length.", call. = FALSE)
   }
-  .validate_run_boundaries(run_boundaries, n_tp = length(x))
+  .validate_run_boundaries(
+    run_boundaries,
+    n_tp = length(x),
+    diagnostic_context = diagnostic_context
+  )
 
   x_work <- as.numeric(x)
   y_work <- as.numeric(y)
@@ -246,6 +252,7 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
 
   x <- as.numeric(tbl[[roi_x]])
   y <- as.numeric(tbl[[roi_y]])
+  entities <- .extract_entities_from_path(file_path)
 
   sw <- compute_sliding_connectivity(
     x = x,
@@ -254,10 +261,15 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
     window_size_tp = config$window_size_tp,
     step_size_tp = config$step_size_tp,
     min_points_per_window = config$min_points_per_window,
-    regress_pair_mean_signal = config$regress_pair_mean_signal
+    regress_pair_mean_signal = config$regress_pair_mean_signal,
+    diagnostic_context = sprintf(
+      "subject=%s; session=%s; source_file=%s",
+      entities$subject,
+      entities$session,
+      basename(file_path)
+    )
   )
 
-  entities <- .extract_entities_from_path(file_path)
   sw$subject <- entities$subject
   sw$session <- entities$session
   sw$source_file <- basename(file_path)
@@ -337,7 +349,7 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
   out
 }
 
-.validate_run_boundaries <- function(run_boundaries, n_tp) {
+.validate_run_boundaries <- function(run_boundaries, n_tp, diagnostic_context = NULL) {
   required <- c("run_id", "start_tp", "end_tp")
   if (!all(required %in% names(run_boundaries))) {
     stop("run_boundaries must include run_id, start_tp, end_tp.", call. = FALSE)
@@ -350,7 +362,31 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
     stop("run_boundaries start_tp/end_tp must be integers.", call. = FALSE)
   }
   if (any(starts < 1L) || any(ends < starts) || any(ends > n_tp)) {
-    stop("run_boundaries are outside the available timeseries length.", call. = FALSE)
+    run_tbl <- data.frame(
+      run_id = as.character(run_boundaries$run_id),
+      start_tp = starts,
+      end_tp = ends,
+      stringsAsFactors = FALSE
+    )
+    run_tbl_text <- paste(capture.output(print(run_tbl, row.names = FALSE)), collapse = "\n")
+
+    ctx <- if (is.null(diagnostic_context) || diagnostic_context == "") {
+      "context=unknown"
+    } else {
+      diagnostic_context
+    }
+
+    msg <- paste(
+      "run_boundaries are outside the available timeseries length.",
+      paste0("Context: ", ctx),
+      paste0("Available timeseries length (n_tp): ", n_tp),
+      paste0("Configured min start_tp: ", min(starts), "; max end_tp: ", max(ends)),
+      "Configured run_boundaries:",
+      run_tbl_text,
+      sep = "\n"
+    )
+
+    stop(msg, call. = FALSE)
   }
 }
 

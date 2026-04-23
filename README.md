@@ -55,4 +55,4 @@ result <- syncfmri_run_pipeline(
 )
 ```
 
-The minimal wrapper script is available at `inst/scripts/run_syncfmri_wrapper.R`.
+Study-specific wrapper scripts should be maintained outside this package repository.
