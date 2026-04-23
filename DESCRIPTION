@@ -1,6 +1,6 @@
 Package: syncfmri
 Title: Tools for Synchronized fMRI Analysis
-Version: 0.0.0.9008
+Version: 0.0.0.9009
 Authors@R: 
     person("James", "Bartolotti", , "jbartolotti2@kumc.edu", role = c("aut", "cre"))
 Description: Infrastructure for sliding window functional connectivity fMRI workflows.

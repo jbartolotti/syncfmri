@@ -170,13 +170,16 @@ compute_sliding_connectivity <- function(
 #' @param config Named list of pipeline settings.
 #' @param plot_only Logical; if TRUE, skip recomputation and render outputs
 #'   from previously saved group windows.
+#' @param overwrite Logical; if TRUE, regenerate outputs even when cached
+#'   section outputs are available on disk.
 #'
 #' @return A list containing subject and group output paths.
 #' @export
 syncfmri_run_pipeline <- function(
     bids_root,
     config = syncfmri_default_config(),
-    plot_only = FALSE) {
+  plot_only = FALSE,
+  overwrite = FALSE) {
   .validate_pipeline_config(config)
 
   bids_root <- normalizePath(bids_root, winslash = "/", mustWork = TRUE)
@@ -200,47 +203,60 @@ syncfmri_run_pipeline <- function(
   dir.create(dirname(group_tsv), recursive = TRUE, showWarnings = FALSE)
   dir.create(dirname(plot_png), recursive = TRUE, showWarnings = FALSE)
 
+  group_cached <- file.exists(group_rds) && file.exists(group_peaks_rds)
+  density_cached <- file.exists(density_rds)
+  heatmap_cached <- file.exists(plot_png)
+  density_all_cached <- file.exists(density_all_png)
+  density_sub_cached <- file.exists(density_sub_png)
+
   if (isTRUE(plot_only)) {
     files <- character(0)
     group_table <- .load_existing_group_windows(group_rds = group_rds, group_tsv = group_tsv)
     peak_table <- .load_existing_group_peaks(group_peaks_rds = group_peaks_rds, group_peaks_tsv = group_peaks_tsv)
   } else {
-    if (!dir.exists(input_root)) {
-      stop(
-        sprintf("Input derivative directory does not exist: %s", input_root),
-        call. = FALSE
+    if (!isTRUE(overwrite) && group_cached) {
+      files <- character(0)
+      group_table <- readRDS(group_rds)
+      peak_table <- readRDS(group_peaks_rds)
+    } else {
+      if (!dir.exists(input_root)) {
+        stop(
+          sprintf("Input derivative directory does not exist: %s", input_root),
+          call. = FALSE
+        )
+      }
+
+      files <- .discover_timecourse_files(input_root, config$timecourse_file_regex)
+      if (length(files) == 0L) {
+        stop("No timecourse files matched the configured pattern.", call. = FALSE)
+      }
+
+      group_map <- .load_participants_groups(
+        bids_root = bids_root,
+        subgroup_column = config$subgroup_column
       )
+
+      subject_results <- lapply(files, function(one_file) {
+        .process_single_timecourse(
+          file_path = one_file,
+          output_root = output_root,
+          config = config,
+          group_map = group_map,
+          overwrite = isTRUE(overwrite)
+        )
+      })
+
+      group_table <- do.call(rbind, lapply(subject_results, function(x) x$sw))
+      rownames(group_table) <- NULL
+      peak_table <- do.call(rbind, lapply(subject_results, function(x) x$peaks))
+      rownames(peak_table) <- NULL
+
+      readr::write_tsv(group_table, group_tsv, na = "n/a")
+      saveRDS(group_table, group_rds)
+
+      readr::write_tsv(peak_table, group_peaks_tsv, na = "n/a")
+      saveRDS(peak_table, group_peaks_rds)
     }
-
-    files <- .discover_timecourse_files(input_root, config$timecourse_file_regex)
-    if (length(files) == 0L) {
-      stop("No timecourse files matched the configured pattern.", call. = FALSE)
-    }
-
-    group_map <- .load_participants_groups(
-      bids_root = bids_root,
-      subgroup_column = config$subgroup_column
-    )
-
-    subject_results <- lapply(files, function(one_file) {
-      .process_single_timecourse(
-        file_path = one_file,
-        output_root = output_root,
-        config = config,
-        group_map = group_map
-      )
-    })
-
-    group_table <- do.call(rbind, lapply(subject_results, function(x) x$sw))
-    rownames(group_table) <- NULL
-    peak_table <- do.call(rbind, lapply(subject_results, function(x) x$peaks))
-    rownames(peak_table) <- NULL
-
-    readr::write_tsv(group_table, group_tsv, na = "n/a")
-    saveRDS(group_table, group_rds)
-
-    readr::write_tsv(peak_table, group_peaks_tsv, na = "n/a")
-    saveRDS(peak_table, group_peaks_rds)
   }
 
   group_meta <- list(
@@ -282,20 +298,26 @@ syncfmri_run_pipeline <- function(
   )
   jsonlite::write_json(peaks_meta, group_peaks_json, pretty = TRUE, auto_unbox = TRUE)
 
-  .plot_group_heatmap(
-    group_table = group_table,
-    png_path = plot_png,
-    event_seconds = config$event_seconds
-  )
+  if (isTRUE(overwrite) || !heatmap_cached) {
+    .plot_group_heatmap(
+      group_table = group_table,
+      png_path = plot_png,
+      event_seconds = config$event_seconds
+    )
+  }
 
-  density_table <- .compute_peak_density(
-    peak_table = peak_table,
-    group_table = group_table,
-    bin_seconds = as.numeric(config$peak_density_bin_seconds),
-    subgroup_levels = config$subgroup_levels
-  )
-  readr::write_tsv(density_table, density_tsv, na = "n/a")
-  saveRDS(density_table, density_rds)
+  if (!isTRUE(overwrite) && density_cached) {
+    density_table <- readRDS(density_rds)
+  } else {
+    density_table <- .compute_peak_density(
+      peak_table = peak_table,
+      group_table = group_table,
+      bin_seconds = as.numeric(config$peak_density_bin_seconds),
+      subgroup_levels = config$subgroup_levels
+    )
+    readr::write_tsv(density_table, density_tsv, na = "n/a")
+    saveRDS(density_table, density_rds)
+  }
 
   density_meta <- list(
     Description = "Peak density over time for all subjects and subgroups.",
@@ -303,12 +325,16 @@ syncfmri_run_pipeline <- function(
   )
   jsonlite::write_json(density_meta, density_json, pretty = TRUE, auto_unbox = TRUE)
 
-  .plot_peak_density(density_table = density_table, png_path = density_all_png, subgroup = "ALL")
-  .plot_peak_density_subgroups(
-    density_table = density_table,
-    png_path = density_sub_png,
-    subgroup_levels = config$subgroup_levels
-  )
+  if (isTRUE(overwrite) || !density_all_cached) {
+    .plot_peak_density(density_table = density_table, png_path = density_all_png, subgroup = "ALL")
+  }
+  if (isTRUE(overwrite) || !density_sub_cached) {
+    .plot_peak_density_subgroups(
+      density_table = density_table,
+      png_path = density_sub_png,
+      subgroup_levels = config$subgroup_levels
+    )
+  }
 
   jsonlite::write_json(
     list(
@@ -328,6 +354,7 @@ syncfmri_run_pipeline <- function(
     input_root = input_root,
     output_root = output_root,
     plot_only = isTRUE(plot_only),
+    overwrite = isTRUE(overwrite),
     n_files_processed = length(files),
     group_tsv = group_tsv,
     group_json = group_json,
@@ -383,80 +410,10 @@ syncfmri_run_pipeline <- function(
   )
 }
 
-.process_single_timecourse <- function(file_path, output_root, config, group_map) {
-  tbl <- readr::read_tsv(
-    file_path,
-    show_col_types = FALSE,
-    progress = FALSE,
-    skip_empty_rows = FALSE,
-    na = c("NA", "NaN", "n/a")
-  )
-
+.process_single_timecourse <- function(file_path, output_root, config, group_map, overwrite = FALSE) {
+  entities <- .extract_entities_from_path(file_path)
   roi_x <- config$roi_x
   roi_y <- config$roi_y
-
-  if (!(roi_x %in% names(tbl))) {
-    stop(sprintf("ROI column not found: %s in %s", roi_x, file_path), call. = FALSE)
-  }
-  if (!(roi_y %in% names(tbl))) {
-    stop(sprintf("ROI column not found: %s in %s", roi_y, file_path), call. = FALSE)
-  }
-
-  x <- as.numeric(tbl[[roi_x]])
-  y <- as.numeric(tbl[[roi_y]])
-  x[is.na(x)] <- NaN
-  y[is.na(y)] <- NaN
-  entities <- .extract_entities_from_path(file_path)
-
-  nuisance_signal <- NULL
-  if (isTRUE(config$regress_pair_mean_signal)) {
-    numeric_cols <- vapply(tbl, is.numeric, logical(1))
-    if (!any(numeric_cols)) {
-      stop(
-        sprintf("No numeric columns available to build nuisance signal in %s", file_path),
-        call. = FALSE
-      )
-    }
-
-    nuisance_signal <- rowMeans(tbl[, numeric_cols, drop = FALSE], na.rm = TRUE)
-    nuisance_signal[is.nan(nuisance_signal)] <- NA_real_
-  }
-
-  sw <- compute_sliding_connectivity(
-    x = x,
-    y = y,
-    run_boundaries = config$run_boundaries,
-    window_size_tp = config$window_size_tp,
-    step_size_tp = config$step_size_tp,
-    min_points_per_window = config$min_points_per_window,
-    regress_pair_mean_signal = config$regress_pair_mean_signal,
-    nuisance_signal = nuisance_signal,
-    diagnostic_context = sprintf(
-      "subject=%s; session=%s; source_file=%s",
-      entities$subject,
-      entities$session,
-      basename(file_path)
-    )
-  )
-
-  subject_group <- .subject_group_from_map(entities$subject, group_map)
-
-  sw$subject <- entities$subject
-  sw$session <- entities$session
-  sw$group <- subject_group
-  sw$source_file <- basename(file_path)
-  sw$time_seconds <- (sw$window_center_tp - 1) * config$tr_seconds
-
-  peaks <- .detect_subject_peaks(
-    sw = sw,
-    event_seconds = config$event_seconds,
-    prominence_quantile = as.numeric(config$peak_prominence_quantile),
-    min_distance_seconds = as.numeric(config$peak_min_distance_seconds),
-    min_height = as.numeric(config$peak_min_height),
-    positive_only = isTRUE(config$peak_positive_only),
-    event_max_distance_seconds = as.numeric(config$peak_event_max_distance_seconds),
-    default_min_distance_seconds = as.numeric(config$window_size_tp) * as.numeric(config$tr_seconds)
-  )
 
   out_dir <- file.path(output_root, entities$subject, entities$session, "func")
   fig_dir <- file.path(output_root, entities$subject, entities$session, "figures")
@@ -476,23 +433,138 @@ syncfmri_run_pipeline <- function(
   peak_rds_path <- file.path(out_dir, paste0(entities$subject, "_", entities$session, "_desc-peaks_timeseries.rds"))
   subj_plot_path <- file.path(fig_dir, paste0(entities$subject, "_", entities$session, "_desc-timeseries_peaks.png"))
 
-  readr::write_tsv(sw, tsv_path, na = "n/a")
-  saveRDS(sw, rds_path)
-  readr::write_tsv(peaks, peak_tsv_path, na = "n/a")
-  saveRDS(peaks, peak_rds_path)
+  sw_cached <- file.exists(rds_path)
+  peaks_cached <- file.exists(peak_rds_path)
 
-  .plot_subject_timeseries_with_peaks(
-    x = x,
-    y = y,
-    sw = sw,
-    peaks = peaks,
-    roi_x = roi_x,
-    roi_y = roi_y,
-    event_seconds = config$event_seconds,
-    tr_seconds = config$tr_seconds,
-    png_path = subj_plot_path,
-    subject_label = paste(entities$subject, entities$session)
-  )
+  subject_group <- .subject_group_from_map(entities$subject, group_map)
+  sw <- NULL
+  peaks <- NULL
+
+  if (!isTRUE(overwrite) && sw_cached && peaks_cached) {
+    sw <- readRDS(rds_path)
+    peaks <- readRDS(peak_rds_path)
+  }
+
+  needs_plot <- isTRUE(overwrite) || !file.exists(subj_plot_path)
+  needs_compute <- is.null(sw) || is.null(peaks)
+
+  x <- NULL
+  y <- NULL
+  tbl <- NULL
+
+  if (needs_compute || needs_plot) {
+    tbl <- readr::read_tsv(
+      file_path,
+      show_col_types = FALSE,
+      progress = FALSE,
+      skip_empty_rows = FALSE,
+      na = c("NA", "NaN", "n/a")
+    )
+
+    if (!(roi_x %in% names(tbl))) {
+      stop(sprintf("ROI column not found: %s in %s", roi_x, file_path), call. = FALSE)
+    }
+    if (!(roi_y %in% names(tbl))) {
+      stop(sprintf("ROI column not found: %s in %s", roi_y, file_path), call. = FALSE)
+    }
+
+    x <- as.numeric(tbl[[roi_x]])
+    y <- as.numeric(tbl[[roi_y]])
+    x[is.na(x)] <- NaN
+    y[is.na(y)] <- NaN
+  }
+
+  if (needs_compute) {
+    nuisance_signal <- NULL
+    if (isTRUE(config$regress_pair_mean_signal)) {
+      numeric_cols <- vapply(tbl, is.numeric, logical(1))
+      if (!any(numeric_cols)) {
+        stop(
+          sprintf("No numeric columns available to build nuisance signal in %s", file_path),
+          call. = FALSE
+        )
+      }
+
+      nuisance_signal <- rowMeans(tbl[, numeric_cols, drop = FALSE], na.rm = TRUE)
+      nuisance_signal[is.nan(nuisance_signal)] <- NA_real_
+    }
+
+    sw <- compute_sliding_connectivity(
+      x = x,
+      y = y,
+      run_boundaries = config$run_boundaries,
+      window_size_tp = config$window_size_tp,
+      step_size_tp = config$step_size_tp,
+      min_points_per_window = config$min_points_per_window,
+      regress_pair_mean_signal = config$regress_pair_mean_signal,
+      nuisance_signal = nuisance_signal,
+      diagnostic_context = sprintf(
+        "subject=%s; session=%s; source_file=%s",
+        entities$subject,
+        entities$session,
+        basename(file_path)
+      )
+    )
+
+    sw$subject <- entities$subject
+    sw$session <- entities$session
+    sw$group <- subject_group
+    sw$source_file <- basename(file_path)
+    sw$time_seconds <- (sw$window_center_tp - 1) * config$tr_seconds
+
+    peaks <- .detect_subject_peaks(
+      sw = sw,
+      event_seconds = config$event_seconds,
+      prominence_quantile = as.numeric(config$peak_prominence_quantile),
+      min_distance_seconds = as.numeric(config$peak_min_distance_seconds),
+      min_height = as.numeric(config$peak_min_height),
+      positive_only = isTRUE(config$peak_positive_only),
+      event_max_distance_seconds = as.numeric(config$peak_event_max_distance_seconds),
+      default_min_distance_seconds = as.numeric(config$window_size_tp) * as.numeric(config$tr_seconds)
+    )
+
+    readr::write_tsv(sw, tsv_path, na = "n/a")
+    saveRDS(sw, rds_path)
+    readr::write_tsv(peaks, peak_tsv_path, na = "n/a")
+    saveRDS(peaks, peak_rds_path)
+  }
+
+  if (!("group" %in% names(sw))) {
+    sw$group <- subject_group
+  }
+
+  if (!("group" %in% names(peaks))) {
+    peaks$group <- subject_group
+  }
+
+  if (needs_plot) {
+    if (is.null(x) || is.null(y)) {
+      tbl <- readr::read_tsv(
+        file_path,
+        show_col_types = FALSE,
+        progress = FALSE,
+        skip_empty_rows = FALSE,
+        na = c("NA", "NaN", "n/a")
+      )
+      x <- as.numeric(tbl[[roi_x]])
+      y <- as.numeric(tbl[[roi_y]])
+      x[is.na(x)] <- NaN
+      y[is.na(y)] <- NaN
+    }
+
+    .plot_subject_timeseries_with_peaks(
+      x = x,
+      y = y,
+      sw = sw,
+      peaks = peaks,
+      roi_x = roi_x,
+      roi_y = roi_y,
+      event_seconds = config$event_seconds,
+      tr_seconds = config$tr_seconds,
+      png_path = subj_plot_path,
+      subject_label = paste(entities$subject, entities$session)
+    )
+  }
 
   sidecar <- list(
     Description = "Sliding-window ROI connectivity values for one subject/session.",
@@ -500,7 +572,9 @@ syncfmri_run_pipeline <- function(
     ROIPair = list(roi_x = roi_x, roi_y = roi_y),
     Parameters = config
   )
-  jsonlite::write_json(sidecar, json_path, pretty = TRUE, auto_unbox = TRUE)
+  if (isTRUE(overwrite) || !file.exists(json_path)) {
+    jsonlite::write_json(sidecar, json_path, pretty = TRUE, auto_unbox = TRUE)
+  }
 
   peak_sidecar <- list(
     Description = "Detected connectivity peaks for one subject/session.",
@@ -508,7 +582,9 @@ syncfmri_run_pipeline <- function(
     ROIPair = list(roi_x = roi_x, roi_y = roi_y),
     Parameters = config
   )
-  jsonlite::write_json(peak_sidecar, peak_json_path, pretty = TRUE, auto_unbox = TRUE)
+  if (isTRUE(overwrite) || !file.exists(peak_json_path)) {
+    jsonlite::write_json(peak_sidecar, peak_json_path, pretty = TRUE, auto_unbox = TRUE)
+  }
 
   list(sw = sw, peaks = peaks)
 }
