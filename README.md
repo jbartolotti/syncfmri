@@ -27,7 +27,7 @@ Open the project in RStudio using syncfmri.Rproj.
 - Enforce run boundaries so windows do not cross run transitions.
 - Drop windows below minimum valid paired timepoints.
 - Preserve blank/censored rows from ROI TSV input as NaN samples.
-- Optionally regress each ROI on pair-mean signal and use residuals.
+- Optionally regress each ROI on a file-level nuisance signal (mean across numeric ROI columns) and use residuals.
 - Write subject/group TSV + JSON sidecars + RDS outputs.
 - Create a group heatmap (time x subject, color = Fisher-z) using viridis.
 

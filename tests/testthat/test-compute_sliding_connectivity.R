@@ -49,3 +49,32 @@ test_that("windows below min valid points are NA", {
   expect_true(any(is.na(out$fisher_z)))
   expect_true(any(out$n_valid_tp < 10L))
 })
+
+test_that("nuisance regression does not force perfect anti-correlation", {
+  set.seed(101)
+  n <- 120
+  nuisance <- as.numeric(scale(sin(seq(0, 6, length.out = n)) + rnorm(n, sd = 0.2)))
+  x <- 0.6 * nuisance + rnorm(n, sd = 0.7)
+  y <- 0.5 * nuisance + rnorm(n, sd = 0.7)
+
+  runs <- data.frame(
+    run_id = c("run-1", "run-2"),
+    start_tp = c(1L, 61L),
+    end_tp = c(60L, 120L)
+  )
+
+  out <- compute_sliding_connectivity(
+    x = x,
+    y = y,
+    run_boundaries = runs,
+    window_size_tp = 12L,
+    step_size_tp = 1L,
+    min_points_per_window = 8L,
+    regress_pair_mean_signal = TRUE,
+    nuisance_signal = nuisance
+  )
+
+  valid_r <- out$pearson_r[!is.na(out$pearson_r)]
+  expect_gt(length(valid_r), 0)
+  expect_false(all(valid_r < -0.995))
+})

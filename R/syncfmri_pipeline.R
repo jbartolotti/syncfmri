@@ -34,6 +34,8 @@ syncfmri_default_config <- function() {
 #' @param step_size_tp Integer step size in timepoints.
 #' @param min_points_per_window Minimum non-missing paired timepoints required.
 #' @param regress_pair_mean_signal Logical; if TRUE, regress each ROI on pair mean.
+#' @param nuisance_signal Optional numeric nuisance vector used when
+#'   `regress_pair_mean_signal = TRUE`.
 #' @param diagnostic_context Optional label included in boundary validation errors.
 #'
 #' @return A data frame of sliding-window connectivity values.
@@ -46,6 +48,7 @@ compute_sliding_connectivity <- function(
     step_size_tp = 1L,
     min_points_per_window = 8L,
     regress_pair_mean_signal = FALSE,
+    nuisance_signal = NULL,
     diagnostic_context = NULL) {
   if (length(x) != length(y)) {
     stop("x and y must have the same length.", call. = FALSE)
@@ -60,10 +63,20 @@ compute_sliding_connectivity <- function(
   y_work <- as.numeric(y)
 
   if (isTRUE(regress_pair_mean_signal)) {
-    pair_mean <- rowMeans(cbind(x_work, y_work), na.rm = TRUE)
-    pair_mean[is.nan(pair_mean)] <- NA_real_
-    x_work <- .residualize_on_signal(x_work, pair_mean)
-    y_work <- .residualize_on_signal(y_work, pair_mean)
+    if (is.null(nuisance_signal)) {
+      stop(
+        "regress_pair_mean_signal = TRUE requires a nuisance_signal vector.",
+        call. = FALSE
+      )
+    }
+
+    nuisance_signal <- as.numeric(nuisance_signal)
+    if (length(nuisance_signal) != length(x_work)) {
+      stop("nuisance_signal must be the same length as x and y.", call. = FALSE)
+    }
+
+    x_work <- .residualize_on_signal(x_work, nuisance_signal)
+    y_work <- .residualize_on_signal(y_work, nuisance_signal)
   }
 
   rows <- vector("list", nrow(run_boundaries))
@@ -262,6 +275,20 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
   y[is.na(y)] <- NaN
   entities <- .extract_entities_from_path(file_path)
 
+  nuisance_signal <- NULL
+  if (isTRUE(config$regress_pair_mean_signal)) {
+    numeric_cols <- vapply(tbl, is.numeric, logical(1))
+    if (!any(numeric_cols)) {
+      stop(
+        sprintf("No numeric columns available to build nuisance signal in %s", file_path),
+        call. = FALSE
+      )
+    }
+
+    nuisance_signal <- rowMeans(tbl[, numeric_cols, drop = FALSE], na.rm = TRUE)
+    nuisance_signal[is.nan(nuisance_signal)] <- NA_real_
+  }
+
   sw <- compute_sliding_connectivity(
     x = x,
     y = y,
@@ -270,6 +297,7 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
     step_size_tp = config$step_size_tp,
     min_points_per_window = config$min_points_per_window,
     regress_pair_mean_signal = config$regress_pair_mean_signal,
+    nuisance_signal = nuisance_signal,
     diagnostic_context = sprintf(
       "subject=%s; session=%s; source_file=%s",
       entities$subject,
@@ -467,7 +495,7 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
     )
   ) +
     ggplot2::geom_tile() +
-    ggplot2::facet_wrap(ggplot2::vars(rlang::.data$run_id), scales = "free_x", ncol = 1) +
+    ggplot2::facet_wrap(~run_id, scales = "free_x", ncol = 1) +
     viridis::scale_fill_viridis(option = "viridis", na.value = "grey80") +
     ggplot2::labs(
       title = "Sliding-window Fisher-z Connectivity",
