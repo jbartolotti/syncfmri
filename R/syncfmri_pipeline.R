@@ -18,6 +18,7 @@ syncfmri_default_config <- function() {
     step_size_tp = 1L,
     min_points_per_window = 8L,
     regress_pair_mean_signal = FALSE,
+    event_seconds = numeric(0),
     output_derivative_name = "syncfmri"
   )
 }
@@ -234,14 +235,19 @@ syncfmri_run_pipeline <- function(
   )
   jsonlite::write_json(group_meta, group_json, pretty = TRUE, auto_unbox = TRUE)
 
-  .plot_group_heatmap(group_table, plot_png)
+  .plot_group_heatmap(
+    group_table = group_table,
+    png_path = plot_png,
+    event_seconds = config$event_seconds
+  )
   jsonlite::write_json(
     list(
       Description = "Heatmap of Fisher-z sliding-window connectivity values.",
       ColorMap = "viridis",
       XAxis = "Window midpoint (seconds)",
       YAxis = "Subject",
-      Fill = "Fisher z"
+      Fill = "Fisher z",
+      EventMarkerSeconds = config$event_seconds
     ),
     plot_json,
     pretty = TRUE,
@@ -468,6 +474,7 @@ syncfmri_run_pipeline <- function(
     "step_size_tp",
     "min_points_per_window",
     "regress_pair_mean_signal",
+    "event_seconds",
     "output_derivative_name"
   )
 
@@ -494,12 +501,18 @@ syncfmri_run_pipeline <- function(
   if (as.integer(config$min_points_per_window) < 3L) {
     stop("config$min_points_per_window must be >= 3.", call. = FALSE)
   }
+
+  if (!is.numeric(config$event_seconds)) {
+    stop("config$event_seconds must be numeric.", call. = FALSE)
+  }
 }
 
-.plot_group_heatmap <- function(group_table, png_path) {
+.plot_group_heatmap <- function(group_table, png_path, event_seconds = numeric(0)) {
   plot_tbl <- group_table
   plot_tbl$subject_session <- paste(plot_tbl$subject, plot_tbl$session, sep = "_")
   plot_tbl <- plot_tbl[stats::complete.cases(plot_tbl$fisher_z), , drop = FALSE]
+  event_seconds <- as.numeric(event_seconds)
+  event_seconds <- event_seconds[is.finite(event_seconds)]
 
   if (nrow(plot_tbl) == 0L) {
     p <- ggplot2::ggplot() +
@@ -525,15 +538,25 @@ syncfmri_run_pipeline <- function(
     )
   ) +
     ggplot2::geom_tile() +
+    ggplot2::geom_vline(
+      xintercept = event_seconds,
+      color = "red",
+      linewidth = 0.2,
+      alpha = 0.9
+    ) +
     ggplot2::facet_wrap(~run_id, scales = "free_x", ncol = 1) +
     viridis::scale_fill_viridis(option = "viridis", na.value = "grey80") +
     ggplot2::labs(
       title = "Sliding-window Fisher-z Connectivity",
       x = "Time (seconds)",
-      y = "Subject",
+      y = "",
       fill = "Fisher z"
     ) +
-    ggplot2::theme_minimal(base_size = 12)
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      axis.text.y = ggplot2::element_blank(),
+      axis.ticks.y = ggplot2::element_blank()
+    )
 
   ggplot2::ggsave(
     filename = png_path,
