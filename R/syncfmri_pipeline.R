@@ -514,14 +514,31 @@ syncfmri_run_pipeline <- function(
   event_seconds <- as.numeric(event_seconds)
   event_seconds <- event_seconds[is.finite(event_seconds)]
 
-  run_ranges <- aggregate(
-    time_seconds ~ run_id,
-    data = plot_tbl,
-    FUN = function(x) c(min = min(x), max = max(x))
+  if (nrow(plot_tbl) == 0L) {
+    p <- ggplot2::ggplot() +
+      ggplot2::annotate("text", x = 0, y = 0, label = "No valid windows to plot") +
+      ggplot2::theme_void()
+
+    ggplot2::ggsave(
+      filename = png_path,
+      plot = p,
+      width = 12,
+      height = 8,
+      dpi = 150
+    )
+    return(invisible(NULL))
+  }
+
+  run_levels <- sort(unique(as.character(plot_tbl$run_id)))
+  run_min <- tapply(plot_tbl$time_seconds, plot_tbl$run_id, min, na.rm = TRUE)
+  run_max <- tapply(plot_tbl$time_seconds, plot_tbl$run_id, max, na.rm = TRUE)
+
+  run_ranges <- data.frame(
+    run_id = run_levels,
+    run_min_seconds = as.numeric(run_min[run_levels]),
+    run_max_seconds = as.numeric(run_max[run_levels]),
+    stringsAsFactors = FALSE
   )
-  run_ranges$run_min_seconds <- vapply(run_ranges$time_seconds, function(x) x[[1]], numeric(1))
-  run_ranges$run_max_seconds <- vapply(run_ranges$time_seconds, function(x) x[[2]], numeric(1))
-  run_ranges$time_seconds <- NULL
 
   if (length(event_seconds) > 0L) {
     event_df <- merge(
@@ -537,21 +554,6 @@ syncfmri_run_pipeline <- function(
     ]
   } else {
     event_df <- data.frame(run_id = character(0), event_seconds = numeric(0))
-  }
-
-  if (nrow(plot_tbl) == 0L) {
-    p <- ggplot2::ggplot() +
-      ggplot2::annotate("text", x = 0, y = 0, label = "No valid windows to plot") +
-      ggplot2::theme_void()
-
-    ggplot2::ggsave(
-      filename = png_path,
-      plot = p,
-      width = 12,
-      height = 8,
-      dpi = 150
-    )
-    return(invisible(NULL))
   }
 
   p <- ggplot2::ggplot(
