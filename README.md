@@ -54,6 +54,13 @@ result <- syncfmri_run_pipeline(
 	bids_root = "P:/IRB_STUDY00149390_A015/MR_Data/Connectivity/natfMRI/A015_BIDS",
 	config = cfg
 )
+
+# Regenerate only the group figure from previously saved windows:
+syncfmri_run_pipeline(
+	bids_root = "P:/IRB_STUDY00149390_A015/MR_Data/Connectivity/natfMRI/A015_BIDS",
+	config = cfg,
+	plot_only = TRUE
+)
 ```
 
 Study-specific wrapper scripts should be maintained outside this package repository.

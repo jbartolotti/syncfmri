@@ -159,38 +159,20 @@ compute_sliding_connectivity <- function(
 #'
 #' @param bids_root Path to BIDS root directory.
 #' @param config Named list of pipeline settings.
+#' @param plot_only Logical; if TRUE, skip recomputation and render outputs
+#'   from previously saved group windows.
 #'
 #' @return A list containing subject and group output paths.
 #' @export
-syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config()) {
+syncfmri_run_pipeline <- function(
+    bids_root,
+    config = syncfmri_default_config(),
+    plot_only = FALSE) {
   .validate_pipeline_config(config)
 
   bids_root <- normalizePath(bids_root, winslash = "/", mustWork = TRUE)
   input_root <- file.path(bids_root, "derivatives", config$timecourse_derivative)
   output_root <- file.path(bids_root, "derivatives", config$output_derivative_name)
-
-  if (!dir.exists(input_root)) {
-    stop(
-      sprintf("Input derivative directory does not exist: %s", input_root),
-      call. = FALSE
-    )
-  }
-
-  files <- .discover_timecourse_files(input_root, config$timecourse_file_regex)
-  if (length(files) == 0L) {
-    stop("No timecourse files matched the configured pattern.", call. = FALSE)
-  }
-
-  subject_tables <- lapply(files, function(one_file) {
-    .process_single_timecourse(
-      file_path = one_file,
-      output_root = output_root,
-      config = config
-    )
-  })
-
-  group_table <- do.call(rbind, subject_tables)
-  rownames(group_table) <- NULL
 
   group_tsv <- file.path(output_root, "group", "func", "group_desc-slidingconn_timeseries.tsv")
   group_json <- file.path(output_root, "group", "func", "group_desc-slidingconn_timeseries.json")
@@ -201,8 +183,36 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
   dir.create(dirname(group_tsv), recursive = TRUE, showWarnings = FALSE)
   dir.create(dirname(plot_png), recursive = TRUE, showWarnings = FALSE)
 
-  readr::write_tsv(group_table, group_tsv, na = "n/a")
-  saveRDS(group_table, group_rds)
+  if (isTRUE(plot_only)) {
+    files <- character(0)
+    group_table <- .load_existing_group_windows(group_rds = group_rds, group_tsv = group_tsv)
+  } else {
+    if (!dir.exists(input_root)) {
+      stop(
+        sprintf("Input derivative directory does not exist: %s", input_root),
+        call. = FALSE
+      )
+    }
+
+    files <- .discover_timecourse_files(input_root, config$timecourse_file_regex)
+    if (length(files) == 0L) {
+      stop("No timecourse files matched the configured pattern.", call. = FALSE)
+    }
+
+    subject_tables <- lapply(files, function(one_file) {
+      .process_single_timecourse(
+        file_path = one_file,
+        output_root = output_root,
+        config = config
+      )
+    })
+
+    group_table <- do.call(rbind, subject_tables)
+    rownames(group_table) <- NULL
+
+    readr::write_tsv(group_table, group_tsv, na = "n/a")
+    saveRDS(group_table, group_rds)
+  }
 
   group_meta <- list(
     Description = "Group-level sliding window ROI connectivity values.",
@@ -241,12 +251,32 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
   list(
     input_root = input_root,
     output_root = output_root,
+    plot_only = isTRUE(plot_only),
     n_files_processed = length(files),
     group_tsv = group_tsv,
     group_json = group_json,
     group_rds = group_rds,
     group_plot = plot_png,
     group_plot_json = plot_json
+  )
+}
+
+.load_existing_group_windows <- function(group_rds, group_tsv) {
+  if (file.exists(group_rds)) {
+    return(readRDS(group_rds))
+  }
+
+  if (file.exists(group_tsv)) {
+    return(readr::read_tsv(group_tsv, show_col_types = FALSE, progress = FALSE))
+  }
+
+  stop(
+    paste(
+      "plot_only = TRUE requires previously saved windows.",
+      sprintf("Missing files: %s and %s", group_rds, group_tsv),
+      sep = "\n"
+    ),
+    call. = FALSE
   )
 }
 
@@ -488,10 +518,10 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
 
   p <- ggplot2::ggplot(
     plot_tbl,
-    ggplot2::aes(
-      x = rlang::.data$time_seconds,
-      y = rlang::.data$subject_session,
-      fill = rlang::.data$fisher_z
+    ggplot2::aes_string(
+      x = "time_seconds",
+      y = "subject_session",
+      fill = "fisher_z"
     )
   ) +
     ggplot2::geom_tile() +
