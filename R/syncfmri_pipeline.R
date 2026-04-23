@@ -514,6 +514,31 @@ syncfmri_run_pipeline <- function(
   event_seconds <- as.numeric(event_seconds)
   event_seconds <- event_seconds[is.finite(event_seconds)]
 
+  run_ranges <- aggregate(
+    time_seconds ~ run_id,
+    data = plot_tbl,
+    FUN = function(x) c(min = min(x), max = max(x))
+  )
+  run_ranges$run_min_seconds <- vapply(run_ranges$time_seconds, function(x) x[[1]], numeric(1))
+  run_ranges$run_max_seconds <- vapply(run_ranges$time_seconds, function(x) x[[2]], numeric(1))
+  run_ranges$time_seconds <- NULL
+
+  if (length(event_seconds) > 0L) {
+    event_df <- merge(
+      run_ranges,
+      data.frame(event_seconds = event_seconds),
+      by = NULL
+    )
+    event_df <- event_df[
+      event_df$event_seconds >= event_df$run_min_seconds &
+        event_df$event_seconds <= event_df$run_max_seconds,
+      c("run_id", "event_seconds"),
+      drop = FALSE
+    ]
+  } else {
+    event_df <- data.frame(run_id = character(0), event_seconds = numeric(0))
+  }
+
   if (nrow(plot_tbl) == 0L) {
     p <- ggplot2::ggplot() +
       ggplot2::annotate("text", x = 0, y = 0, label = "No valid windows to plot") +
@@ -539,7 +564,9 @@ syncfmri_run_pipeline <- function(
   ) +
     ggplot2::geom_tile() +
     ggplot2::geom_vline(
-      xintercept = event_seconds,
+      data = event_df,
+      mapping = ggplot2::aes_string(xintercept = "event_seconds"),
+      inherit.aes = FALSE,
       color = "red",
       linewidth = 0.2,
       alpha = 0.9
