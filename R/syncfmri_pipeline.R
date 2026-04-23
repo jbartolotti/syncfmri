@@ -775,10 +775,10 @@ syncfmri_run_pipeline <- function(
     )
   }
 
-  peaks$subject <- sw$subject[[1]]
-  peaks$session <- sw$session[[1]]
-  peaks$group <- sw$group[[1]]
-  peaks$source_file <- sw$source_file[[1]]
+  peaks$subject <- rep(sw$subject[[1]], nrow(peaks))
+  peaks$session <- rep(sw$session[[1]], nrow(peaks))
+  peaks$group <- rep(sw$group[[1]], nrow(peaks))
+  peaks$source_file <- rep(sw$source_file[[1]], nrow(peaks))
   peaks
 }
 

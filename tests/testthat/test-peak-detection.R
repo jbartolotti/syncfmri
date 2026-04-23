@@ -27,3 +27,31 @@ test_that("peak detection finds local maxima with prominence threshold", {
   expect_true(all(is.finite(peaks$prominence)))
   expect_true(all(is.finite(peaks$event_distance_seconds)))
 })
+
+test_that("peak detection handles no-peak case without metadata assignment error", {
+  sw <- data.frame(
+    run_id = rep("run-1", 6),
+    window_center_tp = seq_len(6),
+    fisher_z = rep(-0.2, 6),
+    subject = rep("sub-213", 6),
+    session = rep("ses-01", 6),
+    group = rep("OA", 6),
+    source_file = rep("dummy.tsv", 6),
+    time_seconds = seq(0, by = 2, length.out = 6),
+    stringsAsFactors = FALSE
+  )
+
+  peaks <- syncfmri:::.detect_subject_peaks(
+    sw = sw,
+    event_seconds = numeric(0),
+    prominence_quantile = 0.75,
+    min_distance_seconds = 4,
+    min_height = NA_real_,
+    positive_only = TRUE,
+    event_max_distance_seconds = Inf,
+    default_min_distance_seconds = 4
+  )
+
+  expect_equal(nrow(peaks), 0)
+  expect_true(all(c("subject", "session", "group", "source_file") %in% names(peaks)))
+})
