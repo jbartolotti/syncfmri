@@ -238,7 +238,13 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
 }
 
 .process_single_timecourse <- function(file_path, output_root, config) {
-  tbl <- readr::read_tsv(file_path, show_col_types = FALSE, progress = FALSE)
+  tbl <- readr::read_tsv(
+    file_path,
+    show_col_types = FALSE,
+    progress = FALSE,
+    skip_empty_rows = FALSE,
+    na = c("NA", "NaN", "n/a")
+  )
 
   roi_x <- config$roi_x
   roi_y <- config$roi_y
@@ -252,6 +258,8 @@ syncfmri_run_pipeline <- function(bids_root, config = syncfmri_default_config())
 
   x <- as.numeric(tbl[[roi_x]])
   y <- as.numeric(tbl[[roi_y]])
+  x[is.na(x)] <- NaN
+  y[is.na(y)] <- NaN
   entities <- .extract_entities_from_path(file_path)
 
   sw <- compute_sliding_connectivity(
