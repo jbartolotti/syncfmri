@@ -30,6 +30,10 @@ Open the project in RStudio using syncfmri.Rproj.
 - Optionally regress each ROI on a file-level nuisance signal (mean across numeric ROI columns) and use residuals.
 - Write subject/group TSV + JSON sidecars + RDS outputs.
 - Create a group heatmap (time x subject, color = Fisher-z) using viridis.
+- Detect local maxima peaks using prominence and minimum distance rules.
+- Write subject/group peak tables and peak-density tables.
+- Create subject-level multi-panel figures (ROI activity, connectivity, peaks, events).
+- Create group peak-density plots for all subjects and by subgroup.
 
 ## Example run
 
@@ -49,6 +53,12 @@ cfg$tr_seconds <- 2
 cfg$window_size_tp <- 12L
 cfg$min_points_per_window <- 8L
 cfg$regress_pair_mean_signal <- TRUE
+cfg$peak_prominence_quantile <- 0.75
+cfg$peak_min_distance_seconds <- NA_real_  # defaults to one window length in seconds
+cfg$peak_positive_only <- TRUE
+cfg$subgroup_column <- "group"
+cfg$subgroup_levels <- c("YA", "OA")
+cfg$peak_density_bin_seconds <- 4
 
 result <- syncfmri_run_pipeline(
 	bids_root = "P:/IRB_STUDY00149390_A015/MR_Data/Connectivity/natfMRI/A015_BIDS",

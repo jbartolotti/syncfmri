@@ -19,6 +19,14 @@ syncfmri_default_config <- function() {
     min_points_per_window = 8L,
     regress_pair_mean_signal = FALSE,
     event_seconds = numeric(0),
+    peak_prominence_quantile = 0.75,
+    peak_min_distance_seconds = NA_real_,
+    peak_min_height = NA_real_,
+    peak_positive_only = TRUE,
+    peak_event_max_distance_seconds = Inf,
+    subgroup_column = "group",
+    subgroup_levels = c("YA", "OA"),
+    peak_density_bin_seconds = 4,
     output_derivative_name = "syncfmri"
   )
 }
@@ -178,8 +186,16 @@ syncfmri_run_pipeline <- function(
   group_tsv <- file.path(output_root, "group", "func", "group_desc-slidingconn_timeseries.tsv")
   group_json <- file.path(output_root, "group", "func", "group_desc-slidingconn_timeseries.json")
   group_rds <- file.path(output_root, "group", "func", "group_desc-slidingconn_timeseries.rds")
+  group_peaks_tsv <- file.path(output_root, "group", "func", "group_desc-peaks_timeseries.tsv")
+  group_peaks_json <- file.path(output_root, "group", "func", "group_desc-peaks_timeseries.json")
+  group_peaks_rds <- file.path(output_root, "group", "func", "group_desc-peaks_timeseries.rds")
+  density_tsv <- file.path(output_root, "group", "func", "group_desc-peakdensity_timeseries.tsv")
+  density_json <- file.path(output_root, "group", "func", "group_desc-peakdensity_timeseries.json")
+  density_rds <- file.path(output_root, "group", "func", "group_desc-peakdensity_timeseries.rds")
   plot_png <- file.path(output_root, "group", "figures", "group_desc-slidingconn_heatmap.png")
   plot_json <- file.path(output_root, "group", "figures", "group_desc-slidingconn_heatmap.json")
+  density_all_png <- file.path(output_root, "group", "figures", "group_desc-peakdensity_all.png")
+  density_sub_png <- file.path(output_root, "group", "figures", "group_desc-peakdensity_subgroups.png")
 
   dir.create(dirname(group_tsv), recursive = TRUE, showWarnings = FALSE)
   dir.create(dirname(plot_png), recursive = TRUE, showWarnings = FALSE)
@@ -187,6 +203,7 @@ syncfmri_run_pipeline <- function(
   if (isTRUE(plot_only)) {
     files <- character(0)
     group_table <- .load_existing_group_windows(group_rds = group_rds, group_tsv = group_tsv)
+    peak_table <- .load_existing_group_peaks(group_peaks_rds = group_peaks_rds, group_peaks_tsv = group_peaks_tsv)
   } else {
     if (!dir.exists(input_root)) {
       stop(
@@ -200,19 +217,30 @@ syncfmri_run_pipeline <- function(
       stop("No timecourse files matched the configured pattern.", call. = FALSE)
     }
 
-    subject_tables <- lapply(files, function(one_file) {
+    group_map <- .load_participants_groups(
+      bids_root = bids_root,
+      subgroup_column = config$subgroup_column
+    )
+
+    subject_results <- lapply(files, function(one_file) {
       .process_single_timecourse(
         file_path = one_file,
         output_root = output_root,
-        config = config
+        config = config,
+        group_map = group_map
       )
     })
 
-    group_table <- do.call(rbind, subject_tables)
+    group_table <- do.call(rbind, lapply(subject_results, function(x) x$sw))
     rownames(group_table) <- NULL
+    peak_table <- do.call(rbind, lapply(subject_results, function(x) x$peaks))
+    rownames(peak_table) <- NULL
 
     readr::write_tsv(group_table, group_tsv, na = "n/a")
     saveRDS(group_table, group_rds)
+
+    readr::write_tsv(peak_table, group_peaks_tsv, na = "n/a")
+    saveRDS(peak_table, group_peaks_rds)
   }
 
   group_meta <- list(
@@ -235,11 +263,53 @@ syncfmri_run_pipeline <- function(
   )
   jsonlite::write_json(group_meta, group_json, pretty = TRUE, auto_unbox = TRUE)
 
+  peaks_meta <- list(
+    Description = "Group-level detected connectivity peaks.",
+    Columns = list(
+      subject = "BIDS subject label",
+      session = "BIDS session label",
+      group = "Subgroup label from participants.tsv",
+      source_file = "Input ROI timecourse TSV",
+      run_id = "Run identifier",
+      peak_time_seconds = "Peak time in seconds",
+      peak_window_center_tp = "Peak center timepoint",
+      peak_fisher_z = "Peak Fisher z value",
+      prominence = "Peak prominence",
+      nearest_event_seconds = "Nearest event marker time in seconds",
+      event_distance_seconds = "Absolute distance to nearest event marker"
+    ),
+    Parameters = config
+  )
+  jsonlite::write_json(peaks_meta, group_peaks_json, pretty = TRUE, auto_unbox = TRUE)
+
   .plot_group_heatmap(
     group_table = group_table,
     png_path = plot_png,
     event_seconds = config$event_seconds
   )
+
+  density_table <- .compute_peak_density(
+    peak_table = peak_table,
+    group_table = group_table,
+    bin_seconds = as.numeric(config$peak_density_bin_seconds),
+    subgroup_levels = config$subgroup_levels
+  )
+  readr::write_tsv(density_table, density_tsv, na = "n/a")
+  saveRDS(density_table, density_rds)
+
+  density_meta <- list(
+    Description = "Peak density over time for all subjects and subgroups.",
+    Parameters = config
+  )
+  jsonlite::write_json(density_meta, density_json, pretty = TRUE, auto_unbox = TRUE)
+
+  .plot_peak_density(density_table = density_table, png_path = density_all_png, subgroup = "ALL")
+  .plot_peak_density_subgroups(
+    density_table = density_table,
+    png_path = density_sub_png,
+    subgroup_levels = config$subgroup_levels
+  )
+
   jsonlite::write_json(
     list(
       Description = "Heatmap of Fisher-z sliding-window connectivity values.",
@@ -262,8 +332,16 @@ syncfmri_run_pipeline <- function(
     group_tsv = group_tsv,
     group_json = group_json,
     group_rds = group_rds,
+    group_peaks_tsv = group_peaks_tsv,
+    group_peaks_json = group_peaks_json,
+    group_peaks_rds = group_peaks_rds,
+    peak_density_tsv = density_tsv,
+    peak_density_json = density_json,
+    peak_density_rds = density_rds,
     group_plot = plot_png,
-    group_plot_json = plot_json
+    group_plot_json = plot_json,
+    peak_density_all_plot = density_all_png,
+    peak_density_subgroups_plot = density_sub_png
   )
 }
 
@@ -286,7 +364,26 @@ syncfmri_run_pipeline <- function(
   )
 }
 
-.process_single_timecourse <- function(file_path, output_root, config) {
+.load_existing_group_peaks <- function(group_peaks_rds, group_peaks_tsv) {
+  if (file.exists(group_peaks_rds)) {
+    return(readRDS(group_peaks_rds))
+  }
+
+  if (file.exists(group_peaks_tsv)) {
+    return(readr::read_tsv(group_peaks_tsv, show_col_types = FALSE, progress = FALSE))
+  }
+
+  stop(
+    paste(
+      "plot_only = TRUE requires previously saved peak outputs.",
+      sprintf("Missing files: %s and %s", group_peaks_rds, group_peaks_tsv),
+      sep = "\n"
+    ),
+    call. = FALSE
+  )
+}
+
+.process_single_timecourse <- function(file_path, output_root, config, group_map) {
   tbl <- readr::read_tsv(
     file_path,
     show_col_types = FALSE,
@@ -342,13 +439,29 @@ syncfmri_run_pipeline <- function(
     )
   )
 
+  subject_group <- .subject_group_from_map(entities$subject, group_map)
+
   sw$subject <- entities$subject
   sw$session <- entities$session
+  sw$group <- subject_group
   sw$source_file <- basename(file_path)
   sw$time_seconds <- (sw$window_center_tp - 1) * config$tr_seconds
 
+  peaks <- .detect_subject_peaks(
+    sw = sw,
+    event_seconds = config$event_seconds,
+    prominence_quantile = as.numeric(config$peak_prominence_quantile),
+    min_distance_seconds = as.numeric(config$peak_min_distance_seconds),
+    min_height = as.numeric(config$peak_min_height),
+    positive_only = isTRUE(config$peak_positive_only),
+    event_max_distance_seconds = as.numeric(config$peak_event_max_distance_seconds),
+    default_min_distance_seconds = as.numeric(config$window_size_tp) * as.numeric(config$tr_seconds)
+  )
+
   out_dir <- file.path(output_root, entities$subject, entities$session, "func")
+  fig_dir <- file.path(output_root, entities$subject, entities$session, "figures")
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 
   out_prefix <- paste(
     c(entities$subject, entities$session, "desc-slidingconn_timeseries"),
@@ -358,9 +471,28 @@ syncfmri_run_pipeline <- function(
   tsv_path <- file.path(out_dir, paste0(out_prefix, ".tsv"))
   json_path <- file.path(out_dir, paste0(out_prefix, ".json"))
   rds_path <- file.path(out_dir, paste0(out_prefix, ".rds"))
+  peak_tsv_path <- file.path(out_dir, paste0(entities$subject, "_", entities$session, "_desc-peaks_timeseries.tsv"))
+  peak_json_path <- file.path(out_dir, paste0(entities$subject, "_", entities$session, "_desc-peaks_timeseries.json"))
+  peak_rds_path <- file.path(out_dir, paste0(entities$subject, "_", entities$session, "_desc-peaks_timeseries.rds"))
+  subj_plot_path <- file.path(fig_dir, paste0(entities$subject, "_", entities$session, "_desc-timeseries_peaks.png"))
 
   readr::write_tsv(sw, tsv_path, na = "n/a")
   saveRDS(sw, rds_path)
+  readr::write_tsv(peaks, peak_tsv_path, na = "n/a")
+  saveRDS(peaks, peak_rds_path)
+
+  .plot_subject_timeseries_with_peaks(
+    x = x,
+    y = y,
+    sw = sw,
+    peaks = peaks,
+    roi_x = roi_x,
+    roi_y = roi_y,
+    event_seconds = config$event_seconds,
+    tr_seconds = config$tr_seconds,
+    png_path = subj_plot_path,
+    subject_label = paste(entities$subject, entities$session)
+  )
 
   sidecar <- list(
     Description = "Sliding-window ROI connectivity values for one subject/session.",
@@ -370,7 +502,377 @@ syncfmri_run_pipeline <- function(
   )
   jsonlite::write_json(sidecar, json_path, pretty = TRUE, auto_unbox = TRUE)
 
-  sw
+  peak_sidecar <- list(
+    Description = "Detected connectivity peaks for one subject/session.",
+    SourceFile = basename(file_path),
+    ROIPair = list(roi_x = roi_x, roi_y = roi_y),
+    Parameters = config
+  )
+  jsonlite::write_json(peak_sidecar, peak_json_path, pretty = TRUE, auto_unbox = TRUE)
+
+  list(sw = sw, peaks = peaks)
+}
+
+.load_participants_groups <- function(bids_root, subgroup_column) {
+  participants_path <- file.path(bids_root, "participants.tsv")
+  if (!file.exists(participants_path)) {
+    return(setNames(character(0), character(0)))
+  }
+
+  participants <- readr::read_tsv(participants_path, show_col_types = FALSE, progress = FALSE)
+  if (!("participant_id" %in% names(participants))) {
+    return(setNames(character(0), character(0)))
+  }
+  if (!(subgroup_column %in% names(participants))) {
+    return(setNames(character(0), character(0)))
+  }
+
+  ids <- as.character(participants$participant_id)
+  vals <- as.character(participants[[subgroup_column]])
+  setNames(vals, ids)
+}
+
+.subject_group_from_map <- function(subject, group_map) {
+  if (length(group_map) == 0L) {
+    return("UNKNOWN")
+  }
+  if (!(subject %in% names(group_map))) {
+    return("UNKNOWN")
+  }
+  val <- group_map[[subject]]
+  if (is.na(val) || val == "") {
+    return("UNKNOWN")
+  }
+  val
+}
+
+.detect_subject_peaks <- function(
+    sw,
+    event_seconds,
+    prominence_quantile,
+    min_distance_seconds,
+    min_height,
+    positive_only,
+    event_max_distance_seconds,
+    default_min_distance_seconds) {
+  run_ids <- unique(as.character(sw$run_id))
+  peak_rows <- lapply(run_ids, function(run_id) {
+    run_tbl <- sw[sw$run_id == run_id, , drop = FALSE]
+    run_tbl <- run_tbl[order(run_tbl$time_seconds), , drop = FALSE]
+
+    valid <- which(is.finite(run_tbl$fisher_z))
+    if (length(valid) < 3L) {
+      return(data.frame(
+        run_id = character(0),
+        peak_time_seconds = numeric(0),
+        peak_window_center_tp = numeric(0),
+        peak_fisher_z = numeric(0),
+        prominence = numeric(0),
+        nearest_event_seconds = numeric(0),
+        event_distance_seconds = numeric(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+
+    seg_starts <- c(valid[1], valid[which(diff(valid) > 1L) + 1L])
+    seg_ends <- c(valid[which(diff(valid) > 1L)], valid[length(valid)])
+
+    peak_candidates <- vector("list", length(seg_starts))
+    for (s in seq_along(seg_starts)) {
+      idx <- seg_starts[[s]]:seg_ends[[s]]
+      z <- run_tbl$fisher_z[idx]
+      t <- run_tbl$time_seconds[idx]
+      tp <- run_tbl$window_center_tp[idx]
+
+      if (length(z) < 3L) {
+        peak_candidates[[s]] <- data.frame()
+        next
+      }
+
+      local_idx <- which(z[2:(length(z) - 1)] > z[1:(length(z) - 2)] &
+        z[2:(length(z) - 1)] >= z[3:length(z)]) + 1L
+
+      if (length(local_idx) == 0L) {
+        peak_candidates[[s]] <- data.frame()
+        next
+      }
+
+      prom <- vapply(local_idx, function(i) {
+        left_min <- min(z[1:i], na.rm = TRUE)
+        right_min <- min(z[i:length(z)], na.rm = TRUE)
+        z[i] - max(left_min, right_min)
+      }, numeric(1))
+
+      peak_candidates[[s]] <- data.frame(
+        run_id = run_id,
+        peak_time_seconds = t[local_idx],
+        peak_window_center_tp = tp[local_idx],
+        peak_fisher_z = z[local_idx],
+        prominence = prom,
+        stringsAsFactors = FALSE
+      )
+    }
+
+    cand <- do.call(rbind, peak_candidates)
+    if (is.null(cand) || nrow(cand) == 0L) {
+      return(data.frame(
+        run_id = character(0),
+        peak_time_seconds = numeric(0),
+        peak_window_center_tp = numeric(0),
+        peak_fisher_z = numeric(0),
+        prominence = numeric(0),
+        nearest_event_seconds = numeric(0),
+        event_distance_seconds = numeric(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+
+    prom_thr <- stats::quantile(cand$prominence, probs = prominence_quantile, na.rm = TRUE)
+    keep <- cand$prominence >= prom_thr
+
+    if (isTRUE(positive_only)) {
+      keep <- keep & cand$peak_fisher_z > 0
+    }
+    if (is.finite(min_height)) {
+      keep <- keep & cand$peak_fisher_z >= min_height
+    }
+
+    cand <- cand[keep, , drop = FALSE]
+    if (nrow(cand) == 0L) {
+      return(data.frame(
+        run_id = character(0),
+        peak_time_seconds = numeric(0),
+        peak_window_center_tp = numeric(0),
+        peak_fisher_z = numeric(0),
+        prominence = numeric(0),
+        nearest_event_seconds = numeric(0),
+        event_distance_seconds = numeric(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+
+    min_dist <- if (is.finite(min_distance_seconds)) min_distance_seconds else default_min_distance_seconds
+    cand <- cand[order(cand$peak_fisher_z, decreasing = TRUE), , drop = FALSE]
+    selected <- cand[0, , drop = FALSE]
+    for (i in seq_len(nrow(cand))) {
+      if (nrow(selected) == 0L) {
+        selected <- cand[i, , drop = FALSE]
+      } else {
+        d <- abs(selected$peak_time_seconds - cand$peak_time_seconds[[i]])
+        if (all(d >= min_dist)) {
+          selected <- rbind(selected, cand[i, , drop = FALSE])
+        }
+      }
+    }
+
+    selected <- selected[order(selected$peak_time_seconds), , drop = FALSE]
+    if (length(event_seconds) > 0L) {
+      nearest_idx <- vapply(selected$peak_time_seconds, function(t0) {
+        which.min(abs(event_seconds - t0))
+      }, integer(1))
+      nearest <- event_seconds[nearest_idx]
+      d_event <- abs(selected$peak_time_seconds - nearest)
+      if (is.finite(event_max_distance_seconds)) {
+        nearest[d_event > event_max_distance_seconds] <- NA_real_
+      }
+      selected$nearest_event_seconds <- nearest
+      selected$event_distance_seconds <- d_event
+    } else {
+      selected$nearest_event_seconds <- NA_real_
+      selected$event_distance_seconds <- NA_real_
+    }
+
+    selected
+  })
+
+  peaks <- do.call(rbind, peak_rows)
+  if (is.null(peaks) || nrow(peaks) == 0L) {
+    peaks <- data.frame(
+      run_id = character(0),
+      peak_time_seconds = numeric(0),
+      peak_window_center_tp = numeric(0),
+      peak_fisher_z = numeric(0),
+      prominence = numeric(0),
+      nearest_event_seconds = numeric(0),
+      event_distance_seconds = numeric(0),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  peaks$subject <- sw$subject[[1]]
+  peaks$session <- sw$session[[1]]
+  peaks$group <- sw$group[[1]]
+  peaks$source_file <- sw$source_file[[1]]
+  peaks
+}
+
+.plot_subject_timeseries_with_peaks <- function(
+    x,
+    y,
+    sw,
+    peaks,
+    roi_x,
+    roi_y,
+    event_seconds,
+    tr_seconds,
+    png_path,
+    subject_label) {
+  tp_seconds <- (seq_along(x) - 1) * tr_seconds
+  roi_df <- rbind(
+    data.frame(
+      time_seconds = tp_seconds,
+      value = as.numeric(x),
+      series = roi_x,
+      panel = "ROI activity",
+      stringsAsFactors = FALSE
+    ),
+    data.frame(
+      time_seconds = tp_seconds,
+      value = as.numeric(y),
+      series = roi_y,
+      panel = "ROI activity",
+      stringsAsFactors = FALSE
+    )
+  )
+
+  conn_df <- data.frame(
+    time_seconds = sw$time_seconds,
+    value = sw$fisher_z,
+    series = "fisher_z",
+    panel = "Sliding connectivity",
+    stringsAsFactors = FALSE
+  )
+
+  plot_df <- rbind(roi_df, conn_df)
+  p <- ggplot2::ggplot(plot_df, ggplot2::aes_string(x = "time_seconds", y = "value", color = "series")) +
+    ggplot2::geom_line(linewidth = 0.3, alpha = 0.9) +
+    ggplot2::facet_grid(panel ~ ., scales = "free_y") +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::labs(
+      title = paste0("Subject ", subject_label, ": ROI activity and connectivity peaks"),
+      x = "Time (seconds)",
+      y = "Value",
+      color = "Series"
+    )
+
+  if (length(event_seconds) > 0L) {
+    p <- p + ggplot2::geom_vline(
+      xintercept = event_seconds,
+      color = "red",
+      linewidth = 0.15,
+      alpha = 0.7
+    )
+  }
+
+  if (nrow(peaks) > 0L) {
+    peak_plot <- data.frame(
+      time_seconds = peaks$peak_time_seconds,
+      value = peaks$peak_fisher_z,
+      panel = "Sliding connectivity",
+      stringsAsFactors = FALSE
+    )
+    p <- p + ggplot2::geom_point(
+      data = peak_plot,
+      mapping = ggplot2::aes_string(x = "time_seconds", y = "value"),
+      color = "black",
+      size = 1.5,
+      inherit.aes = FALSE
+    )
+  }
+
+  ggplot2::ggsave(filename = png_path, plot = p, width = 12, height = 8, dpi = 150)
+}
+
+.compute_peak_density <- function(peak_table, group_table, bin_seconds, subgroup_levels) {
+  if (!all(c("subject", "run_id", "group") %in% names(group_table))) {
+    stop("group_table missing required columns for density computation.", call. = FALSE)
+  }
+
+  run_levels <- sort(unique(as.character(group_table$run_id)))
+  run_min <- tapply(group_table$time_seconds, group_table$run_id, min, na.rm = TRUE)
+  run_max <- tapply(group_table$time_seconds, group_table$run_id, max, na.rm = TRUE)
+  run_ranges <- data.frame(
+    run_id = run_levels,
+    run_min_seconds = as.numeric(run_min[run_levels]),
+    run_max_seconds = as.numeric(run_max[run_levels]),
+    stringsAsFactors = FALSE
+  )
+
+  subject_runs <- unique(group_table[, c("subject", "run_id", "group")])
+
+  out_rows <- lapply(seq_len(nrow(run_ranges)), function(i) {
+    run_id <- as.character(run_ranges$run_id[[i]])
+    min_t <- as.numeric(run_ranges$run_min_seconds[[i]])
+    max_t <- as.numeric(run_ranges$run_max_seconds[[i]])
+    breaks <- seq(min_t, max_t + bin_seconds, by = bin_seconds)
+    centers <- head(breaks, -1) + bin_seconds / 2
+
+    run_subjects <- subject_runs[subject_runs$run_id == run_id, , drop = FALSE]
+    all_n <- nrow(run_subjects)
+
+    run_peaks <- peak_table[peak_table$run_id == run_id, , drop = FALSE]
+    all_counts <- hist(run_peaks$peak_time_seconds, breaks = breaks, plot = FALSE)$counts
+    all_df <- data.frame(
+      run_id = run_id,
+      group = "ALL",
+      time_bin_seconds = centers,
+      peak_count = all_counts,
+      subject_count = all_n,
+      peak_rate = if (all_n > 0L) all_counts / all_n else NA_real_,
+      stringsAsFactors = FALSE
+    )
+
+    sub_df <- lapply(subgroup_levels, function(g) {
+      g_subjects <- run_subjects[run_subjects$group == g, , drop = FALSE]
+      g_n <- nrow(g_subjects)
+      g_peaks <- run_peaks[run_peaks$group == g, , drop = FALSE]
+      g_counts <- hist(g_peaks$peak_time_seconds, breaks = breaks, plot = FALSE)$counts
+      data.frame(
+        run_id = run_id,
+        group = g,
+        time_bin_seconds = centers,
+        peak_count = g_counts,
+        subject_count = g_n,
+        peak_rate = if (g_n > 0L) g_counts / g_n else NA_real_,
+        stringsAsFactors = FALSE
+      )
+    })
+
+    do.call(rbind, c(list(all_df), sub_df))
+  })
+
+  out <- do.call(rbind, out_rows)
+  rownames(out) <- NULL
+  out
+}
+
+.plot_peak_density <- function(density_table, png_path, subgroup = "ALL") {
+  tbl <- density_table[density_table$group == subgroup, , drop = FALSE]
+  p <- ggplot2::ggplot(tbl, ggplot2::aes_string(x = "time_bin_seconds", y = "peak_rate")) +
+    ggplot2::geom_line(color = "steelblue", linewidth = 0.4) +
+    ggplot2::facet_wrap(~run_id, scales = "free_x", ncol = 1) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::labs(
+      title = "Group Peak Density (All Subjects)",
+      x = "Time (seconds)",
+      y = "Peaks per subject"
+    )
+  ggplot2::ggsave(filename = png_path, plot = p, width = 12, height = 7, dpi = 150)
+}
+
+.plot_peak_density_subgroups <- function(density_table, png_path, subgroup_levels) {
+  tbl <- density_table[density_table$group %in% subgroup_levels, , drop = FALSE]
+  p <- ggplot2::ggplot(tbl, ggplot2::aes_string(x = "time_bin_seconds", y = "peak_rate", color = "group")) +
+    ggplot2::geom_line(linewidth = 0.4) +
+    ggplot2::facet_grid(group ~ run_id, scales = "free_x") +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::labs(
+      title = "Group Peak Density by Subgroup",
+      x = "Time (seconds)",
+      y = "Peaks per subject",
+      color = "Group"
+    )
+  ggplot2::ggsave(filename = png_path, plot = p, width = 12, height = 8, dpi = 150)
 }
 
 .discover_timecourse_files <- function(input_root, file_regex) {
@@ -475,6 +977,14 @@ syncfmri_run_pipeline <- function(
     "min_points_per_window",
     "regress_pair_mean_signal",
     "event_seconds",
+    "peak_prominence_quantile",
+    "peak_min_distance_seconds",
+    "peak_min_height",
+    "peak_positive_only",
+    "peak_event_max_distance_seconds",
+    "subgroup_column",
+    "subgroup_levels",
+    "peak_density_bin_seconds",
     "output_derivative_name"
   )
 
@@ -504,6 +1014,40 @@ syncfmri_run_pipeline <- function(
 
   if (!is.numeric(config$event_seconds)) {
     stop("config$event_seconds must be numeric.", call. = FALSE)
+  }
+
+  if (!is.numeric(config$peak_prominence_quantile) ||
+      config$peak_prominence_quantile < 0 ||
+      config$peak_prominence_quantile > 1) {
+    stop("config$peak_prominence_quantile must be numeric in [0, 1].", call. = FALSE)
+  }
+
+  if (!is.numeric(config$peak_min_distance_seconds)) {
+    stop("config$peak_min_distance_seconds must be numeric.", call. = FALSE)
+  }
+
+  if (!is.numeric(config$peak_min_height)) {
+    stop("config$peak_min_height must be numeric.", call. = FALSE)
+  }
+
+  if (!is.logical(config$peak_positive_only) || length(config$peak_positive_only) != 1L) {
+    stop("config$peak_positive_only must be TRUE/FALSE.", call. = FALSE)
+  }
+
+  if (!is.numeric(config$peak_event_max_distance_seconds)) {
+    stop("config$peak_event_max_distance_seconds must be numeric.", call. = FALSE)
+  }
+
+  if (!is.character(config$subgroup_column) || length(config$subgroup_column) != 1L) {
+    stop("config$subgroup_column must be a single character string.", call. = FALSE)
+  }
+
+  if (!is.character(config$subgroup_levels) || length(config$subgroup_levels) < 1L) {
+    stop("config$subgroup_levels must be a character vector.", call. = FALSE)
+  }
+
+  if (!is.numeric(config$peak_density_bin_seconds) || config$peak_density_bin_seconds <= 0) {
+    stop("config$peak_density_bin_seconds must be > 0.", call. = FALSE)
   }
 }
 
