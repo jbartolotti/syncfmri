@@ -500,7 +500,7 @@ syncfmri_run_pipeline <- function(
       show_col_types = FALSE,
       progress = FALSE,
       skip_empty_rows = FALSE,
-      na = c("NA", "NaN", "n/a")
+      na = c("", "NA", "NaN", "n/a")
     )
 
     if (!(roi_x %in% names(tbl))) {
@@ -607,7 +607,7 @@ syncfmri_run_pipeline <- function(
         show_col_types = FALSE,
         progress = FALSE,
         skip_empty_rows = FALSE,
-        na = c("NA", "NaN", "n/a")
+        na = c("", "NA", "NaN", "n/a")
       )
       x <- as.numeric(tbl[[roi_x]])
       y <- as.numeric(tbl[[roi_y]])
@@ -743,8 +743,26 @@ syncfmri_run_pipeline <- function(
 
             zone_times <- sw$time_seconds[global_idx]
             zone_vals <- sw$smoothed_fisher_z[global_idx]
+            finite_zone <- is.finite(zone_vals)
+            if (!any(finite_zone)) {
+              next
+            }
+
             peak_idx <- which.max(zone_vals)
+            if (length(peak_idx) == 0L || is.na(peak_idx) || peak_idx < 1L) {
+              peak_idx <- which.max(zone_vals[finite_zone])
+              peak_idx <- which(finite_zone)[peak_idx]
+            }
             zone_center <- mean(range(zone_times))
+
+            dt <- if (length(zone_times) > 1L) {
+              stats::median(diff(zone_times), na.rm = TRUE)
+            } else {
+              NA_real_
+            }
+            if (!is.finite(dt) || dt <= 0) {
+              dt <- 1
+            }
 
             nearest_event <- NA_real_
             event_distance <- NA_real_
@@ -761,11 +779,11 @@ syncfmri_run_pipeline <- function(
               zone_id = paste0("zone-", zone_counter),
               zone_start_seconds = min(zone_times),
               zone_end_seconds = max(zone_times),
-              zone_duration_seconds = max(zone_times) - min(zone_times) + median(diff(zone_times)),
+              zone_duration_seconds = max(zone_times) - min(zone_times) + dt,
               zone_peak_seconds = zone_times[[peak_idx]],
               zone_peak_fisher_z = zone_vals[[peak_idx]],
               zone_mean_fisher_z = mean(zone_vals, na.rm = TRUE),
-              zone_auc = sum(zone_vals, na.rm = TRUE) * median(diff(zone_times)),
+              zone_auc = sum(zone_vals, na.rm = TRUE) * dt,
               zone_n_windows = length(zone_vals),
               nearest_event_seconds = nearest_event,
               event_distance_seconds = event_distance,
