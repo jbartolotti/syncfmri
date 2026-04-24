@@ -172,15 +172,24 @@ compute_sliding_connectivity <- function(
 #'   from previously saved group windows.
 #' @param overwrite Logical; if TRUE, regenerate outputs even when cached
 #'   section outputs are available on disk.
+#' @param overwrite_windows Logical; if TRUE, force recomputation of sliding
+#'   window connectivity.
+#' @param overwrite_zones Logical; if TRUE, force recomputation of smoothing
+#'   and zone identification (can reuse cached sliding windows).
 #'
 #' @return A list containing subject and group output paths.
 #' @export
 syncfmri_run_pipeline <- function(
     bids_root,
     config = syncfmri_default_config(),
-  plot_only = FALSE,
-  overwrite = FALSE) {
+    plot_only = FALSE,
+    overwrite = FALSE,
+    overwrite_windows = FALSE,
+    overwrite_zones = FALSE) {
   .validate_pipeline_config(config)
+
+  overwrite_windows <- isTRUE(overwrite) || isTRUE(overwrite_windows)
+  overwrite_zones <- isTRUE(overwrite) || isTRUE(overwrite_zones) || isTRUE(overwrite_windows)
 
   bids_root <- normalizePath(bids_root, winslash = "/", mustWork = TRUE)
   input_root <- file.path(bids_root, "derivatives", config$timecourse_derivative)
@@ -214,7 +223,7 @@ syncfmri_run_pipeline <- function(
     group_table <- .load_existing_group_windows(group_rds = group_rds, group_tsv = group_tsv)
     zone_table <- .load_existing_group_zones(group_zones_rds = group_zones_rds, group_zones_tsv = group_zones_tsv)
   } else {
-    if (!isTRUE(overwrite) && group_cached) {
+    if (!overwrite_windows && !overwrite_zones && group_cached) {
       files <- character(0)
       group_table <- readRDS(group_rds)
       zone_table <- readRDS(group_zones_rds)
@@ -242,7 +251,8 @@ syncfmri_run_pipeline <- function(
           output_root = output_root,
           config = config,
           group_map = group_map,
-          overwrite = isTRUE(overwrite)
+          overwrite_windows = overwrite_windows,
+          overwrite_zones = overwrite_zones
         )
       })
 
@@ -303,7 +313,7 @@ syncfmri_run_pipeline <- function(
   )
   jsonlite::write_json(zones_meta, group_zones_json, pretty = TRUE, auto_unbox = TRUE)
 
-  if (isTRUE(overwrite) || !heatmap_cached) {
+  if (overwrite_windows || !heatmap_cached) {
     .plot_group_heatmap(
       group_table = group_table,
       png_path = plot_png,
@@ -311,7 +321,7 @@ syncfmri_run_pipeline <- function(
     )
   }
 
-  if (!isTRUE(overwrite) && occupancy_cached) {
+  if (!overwrite_zones && occupancy_cached) {
     occupancy_table <- readRDS(occupancy_rds)
   } else {
     occupancy_table <- .compute_zone_occupancy(
@@ -330,7 +340,7 @@ syncfmri_run_pipeline <- function(
   )
   jsonlite::write_json(occupancy_meta, occupancy_json, pretty = TRUE, auto_unbox = TRUE)
 
-  if (isTRUE(overwrite) || !occupancy_sub_cached) {
+  if (overwrite_zones || !occupancy_sub_cached) {
     .plot_zone_occupancy_subgroups(
       occupancy_table = occupancy_table,
       png_path = occupancy_sub_png,
@@ -338,7 +348,7 @@ syncfmri_run_pipeline <- function(
       subgroup_levels = config$subgroup_levels
     )
   }
-  if (isTRUE(overwrite) || !zone_heatmap_cached) {
+  if (overwrite_zones || !zone_heatmap_cached) {
     .plot_zone_heatmap(
       group_table = group_table,
       png_path = zone_heatmap_png,
@@ -365,6 +375,8 @@ syncfmri_run_pipeline <- function(
     output_root = output_root,
     plot_only = isTRUE(plot_only),
     overwrite = isTRUE(overwrite),
+    overwrite_windows = overwrite_windows,
+    overwrite_zones = overwrite_zones,
     n_files_processed = length(files),
     group_tsv = group_tsv,
     group_json = group_json,
@@ -420,7 +432,13 @@ syncfmri_run_pipeline <- function(
   )
 }
 
-.process_single_timecourse <- function(file_path, output_root, config, group_map, overwrite = FALSE) {
+.process_single_timecourse <- function(
+  file_path,
+  output_root,
+  config,
+  group_map,
+  overwrite_windows = FALSE,
+  overwrite_zones = FALSE) {
   entities <- .extract_entities_from_path(file_path)
   roi_x <- config$roi_x
   roi_y <- config$roi_y
@@ -450,19 +468,33 @@ syncfmri_run_pipeline <- function(
   sw <- NULL
   zones <- NULL
 
-  if (!isTRUE(overwrite) && sw_cached && zones_cached) {
+  if (!overwrite_windows && sw_cached) {
     sw <- readRDS(rds_path)
+  }
+  if (!overwrite_zones && zones_cached) {
     zones <- readRDS(zone_rds_path)
   }
 
-  needs_plot <- isTRUE(overwrite) || !file.exists(subj_plot_path)
-  needs_compute <- is.null(sw) || is.null(zones)
+  if (overwrite_windows) {
+    sw <- NULL
+  }
+  if (overwrite_zones) {
+    zones <- NULL
+  }
+
+  needs_compute_windows <- is.null(sw)
+  needs_compute_zones <- is.null(zones)
+  if (needs_compute_windows) {
+    needs_compute_zones <- TRUE
+  }
+
+  needs_plot <- overwrite_zones || overwrite_windows || !file.exists(subj_plot_path)
 
   x <- NULL
   y <- NULL
   tbl <- NULL
 
-  if (needs_compute || needs_plot) {
+  if (needs_compute_windows || needs_plot) {
     tbl <- readr::read_tsv(
       file_path,
       show_col_types = FALSE,
@@ -484,7 +516,7 @@ syncfmri_run_pipeline <- function(
     y[is.na(y)] <- NaN
   }
 
-  if (needs_compute) {
+  if (needs_compute_windows) {
     nuisance_signal <- NULL
     if (isTRUE(config$regress_pair_mean_signal)) {
       numeric_cols <- vapply(tbl, is.numeric, logical(1))
@@ -521,6 +553,11 @@ syncfmri_run_pipeline <- function(
     sw$group <- subject_group
     sw$source_file <- basename(file_path)
     sw$time_seconds <- (sw$window_center_tp - 1) * config$tr_seconds
+    readr::write_tsv(sw, tsv_path, na = "n/a")
+    saveRDS(sw, rds_path)
+  }
+
+  if (needs_compute_zones) {
     smooth_result <- .smooth_and_detect_zones(
       sw = sw,
       smoothing_window = as.integer(config$zone_smoothing_window),
@@ -598,7 +635,7 @@ syncfmri_run_pipeline <- function(
     ROIPair = list(roi_x = roi_x, roi_y = roi_y),
     Parameters = config
   )
-  if (isTRUE(overwrite) || !file.exists(json_path)) {
+  if (overwrite_windows || !file.exists(json_path)) {
     jsonlite::write_json(sidecar, json_path, pretty = TRUE, auto_unbox = TRUE)
   }
 
@@ -608,7 +645,7 @@ syncfmri_run_pipeline <- function(
     ROIPair = list(roi_x = roi_x, roi_y = roi_y),
     Parameters = config
   )
-  if (isTRUE(overwrite) || !file.exists(zone_json_path)) {
+  if (overwrite_zones || !file.exists(zone_json_path)) {
     jsonlite::write_json(zone_sidecar, zone_json_path, pretty = TRUE, auto_unbox = TRUE)
   }
 
